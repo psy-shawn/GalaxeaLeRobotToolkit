@@ -1,6 +1,6 @@
 #!/bin/bash
-dataset_name=pick
-input_dir=/Users/psy/workspace/data/r1lite/20260129/pick
+dataset_name=pick_cola_bottle
+input_dir=/Users/psy/workspace/data/r1lite/20260129/pick/pick_cola_bottle
 output_dir=/Users/psy/workspace/data/lerobot/
 robot_type=R1Lite # options: R1Pro, R1Lite
 
@@ -8,7 +8,7 @@ export SAVE_VIDEO=1
 export USE_H264=0
 export USE_COMPRESSION=0
 export IS_COMPUTE_EPISODE_STATS_IMAGE=1
-export MAX_PROCESSES=2
+export MAX_PROCESSES=4
 export USE_ROS1=0
 export USE_TRANSLATION=0
 

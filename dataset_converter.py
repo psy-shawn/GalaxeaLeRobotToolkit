@@ -465,6 +465,8 @@ class DataConverter:
 
     def process_all(self, mcaps_dict: dict):
         start_time = time.time()
+        # Store original raw_data_meta for annotations lookup
+        self.raw_data_meta_dict = mcaps_dict
         mcaps_dict = mcaps_dict["rawDataList"]
         total_files = len(mcaps_dict)
         logger.info("processing num: ", self.max_processes)
@@ -685,14 +687,27 @@ class DataConverter:
             fps=fps,
         )
 
-        # get coarse description and quality label from dcTask and labelsStr
-        # as qualitySubLabel is used by base quality check
-        episode_description = format_shelf_string(self.dataset_name)
+        # get annotations from mcap_info or from raw_data_meta
+        annotations = mcap_info.get("annotations", None)
+        if annotations is None:
+            # Try to find annotations from raw_data_meta.json
+            mcap_path_str = mcap_info["path"]
+            for raw_data_item in self.raw_data_meta_dict.get("rawDataList", []):
+                if raw_data_item["path"] == mcap_path_str:
+                    annotations = raw_data_item.get("annotations", None)
+                    break
+        
+        # get task description from annotations.text or fallback to dataset_name
+        if annotations and len(annotations) > 0 and "text" in annotations[0]:
+            episode_description = annotations[0]["text"]
+        else:
+            # fallback to dataset_name if no annotations available
+            episode_description = format_shelf_string(self.dataset_name)
+            logger.warning(f"No annotations found for {mcap_path}, using dataset_name as task: {episode_description}")
 
         # get fine description and quality label from annotation.text and annotation.actionQualityLabel
         framewise_descriptions = []
         framewise_quality = []
-        annotations = mcap_info.get("annotations", None)
         if self.use_translation:
             for annotation in annotations:
                 annotation["translated_text"] = self.deepseek_translate_instruction(annotation["text"])
@@ -947,20 +962,56 @@ def search_rosbags(input_dir: str):
         bag_files = list(path.rglob('*.mcap'))
     return sorted([str(file.absolute()) for file in bag_files])
 
+def find_raw_data_meta_files(root_dir):
+    """Recursively find all raw_data_meta.json files in the directory tree.
+    Stop searching deeper once a raw_data_meta.json is found in a directory.
+    """
+    raw_data_meta_files = []
+    
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        if "raw_data_meta.json" in filenames:
+            raw_data_meta_files.append(os.path.join(dirpath, "raw_data_meta.json"))
+            # Don't descend into subdirectories of this directory
+            dirnames.clear()
+    
+    return raw_data_meta_files
+
 def get_raw_data_meta_from_args():
     args = get_args()
     dataset_name = args.dataset_name
     robot_type = args.robot_type
     output_dir = args.output_dir
-    data_path_list = search_rosbags(args.input_dir)
-
-    raw_data_meta_path = os.path.join(args.input_dir, "raw_data_meta.json")
-    if os.path.exists(raw_data_meta_path):
-        with open(raw_data_meta_path) as f:
-            raw_data_meta_json = json.load(f)
-            raw_data_meta_json = dict(data=raw_data_meta_json)
-            raw_data_meta_json["data"]["rawDataSetName"] = dataset_name
+    
+    # Search for all raw_data_meta.json files recursively
+    raw_data_meta_files = find_raw_data_meta_files(args.input_dir)
+    
+    if raw_data_meta_files:
+        # Merge all raw_data_meta.json files
+        logger.info(f"Found {len(raw_data_meta_files)} raw_data_meta.json file(s)")
+        merged_raw_data_list = []
+        
+        for meta_file in raw_data_meta_files:
+            logger.info(f"Reading: {meta_file}")
+            try:
+                with open(meta_file, 'r') as f:
+                    meta_data = json.load(f)
+                    # Add items from rawDataList
+                    if "rawDataList" in meta_data:
+                        merged_raw_data_list.extend(meta_data["rawDataList"])
+            except Exception as e:
+                logger.warning(f"Failed to read {meta_file}: {e}")
+        
+        raw_data_meta_dict = dict()
+        raw_data_meta_dict["rawDataSetName"] = dataset_name
+        raw_data_meta_dict["rawDataList"] = merged_raw_data_list
+        raw_data_meta_json = dict(data=raw_data_meta_dict)
+        
+        logger.info(f"Total {len(merged_raw_data_list)} mcap files to process")
     else:
+        # Fallback: search for bag/mcap files directly
+        logger.warning(f"No raw_data_meta.json found in {args.input_dir}, searching for bag/mcap files directly")
+        data_path_list = search_rosbags(args.input_dir)
+        
         raw_data_meta_dict = dict()
         raw_data_meta_dict["rawDataSetName"] = dataset_name
         raw_data_meta_dict["rawDataList"] = list()
@@ -972,6 +1023,7 @@ def get_raw_data_meta_from_args():
             raw_data_meta_dict["rawDataList"].append(data_meta)
 
         raw_data_meta_json = dict(data=raw_data_meta_dict)
+    
     return (raw_data_meta_json, output_dir)
 
 def format_shelf_string(s):
