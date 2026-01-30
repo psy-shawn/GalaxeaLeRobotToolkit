@@ -16,6 +16,8 @@ from merge_lerobot_dataset import merge_datasets
 import multiprocessing
 import cv2
 from cv_bridge import CvBridge
+from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
+from rclpy.serialization import deserialize_message
 # default: ROS 2
 USE_ROS1 = bool(int(os.getenv('USE_ROS1', 0)))
 # default: mp4 video
@@ -89,7 +91,11 @@ class DataConverter:
             # check if wrist camera topic has "_rect", can be cleaned by ATC 2.1.5
             reader = SequentialReader()
             storage_options = StorageOptions(uri=sample_mcap_path, storage_id="mcap")
-            converter_options = ConverterOptions()
+            # converter_options = ConverterOptions()
+            converter_options = ConverterOptions(
+                input_serialization_format='cdr',
+                output_serialization_format='cdr'
+            )
             reader.open(storage_options, converter_options)
             all_topics = [topic.name for topic in reader.get_all_topics_and_types()]
             self.RGB_WRIST_LEFT_TOPIC = RGB_WRIST_LEFT_TOPIC
@@ -211,7 +217,11 @@ class DataConverter:
         extracted_msgs = {topic : [] for topic in self.TARGET_TOPICS}
         reader = SequentialReader()
         storage_options = StorageOptions(uri=mcap_file, storage_id="mcap")
-        converter_options = ConverterOptions()
+        # converter_options = ConverterOptions()
+        converter_options = ConverterOptions(
+            input_serialization_format='cdr',
+            output_serialization_format='cdr'
+        )
         reader.open(storage_options, converter_options)
         topic_types = reader.get_all_topics_and_types()
         type_map = {topic.name: topic.type for topic in topic_types}
@@ -505,7 +515,7 @@ class DataConverter:
             if topic == RGB_HEAD_LEFT_TOPIC:
                 bridge = CvBridge()
                 head_rgb_images_list = []
-                head_images = np.array([bridge.compressed_imgmsg_to_cv2(msg) for msg in data])
+                head_images = np.array([cv2.cvtColor(bridge.compressed_imgmsg_to_cv2(msg), cv2.COLOR_BGR2RGB) for msg in data])
                 self.shape_of_images["HEAD_LEFT_RGB"] = head_images[0].shape
                 for i in range(len(index_array) - 1):
                     head_rgb_images_list.append(head_images[index_array[i]:index_array[i+1]])
@@ -514,7 +524,7 @@ class DataConverter:
             elif topic in self.RGB_TOPICS:
                 bridge = CvBridge()
                 wrist_rgb_images_list = []
-                first_image_shape = bridge.compressed_imgmsg_to_cv2(data[0]).shape
+                first_image_shape = cv2.cvtColor(bridge.compressed_imgmsg_to_cv2(data[0]), cv2.COLOR_BGR2RGB).shape
                 if topic == RGB_WRIST_LEFT_TOPIC:
                     self.shape_of_images["WRIST_LEFT_RGB"] = first_image_shape
                 if topic == RGB_WRIST_RIGHT_TOPIC:
@@ -803,7 +813,7 @@ class DataConverter:
         for msg in source_data:
             timestamp = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
             source_timestamps.append(timestamp)
-            source_images.append(bridge.compressed_imgmsg_to_cv2(msg))
+            source_images.append(cv2.cvtColor(bridge.compressed_imgmsg_to_cv2(msg), cv2.COLOR_BGR2RGB))
         
         source_timestamps = np.array(source_timestamps)
         source_images = np.array(source_images)
@@ -989,10 +999,10 @@ if __name__ == '__main__':
         import rclpy
         from rclpy.serialization import deserialize_message
         from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
-        logger.info(f"Use ROS1")
+        logger.info(f"Use ROS2")
     else:
         import rosbag
-        logger.info(f"Use ROS2")
+        logger.info(f"Use ROS1")
 
     if not USE_ROS1:
         rclpy.init()

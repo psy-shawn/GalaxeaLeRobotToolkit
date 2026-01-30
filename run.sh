@@ -1,8 +1,8 @@
 #!/bin/bash
-dataset_name=debug
-input_dir=/home/user/workspace/data/mcap/
-output_dir=/home/user/workspace/data/lerobot/
-robot_type=R1Pro # options: R1Pro, R1Lite
+dataset_name=pick
+input_dir=/Users/psy/workspace/data/r1lite/20260129/pick
+output_dir=/Users/psy/workspace/data/lerobot/
+robot_type=R1Lite # options: R1Pro, R1Lite
 
 export SAVE_VIDEO=1 
 export USE_H264=0
