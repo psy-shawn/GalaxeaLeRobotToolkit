@@ -1,0 +1,26 @@
+{
+  "devices": [
+    {
+      "serial_number": "CP0E753000AH",
+      "config": {
+        "mode": "PRIMARY",
+        "color_delay_us": 0,
+        "depth_delay_us": 0,
+        "trigger_out_enable": true,
+        "trigger_out_delay_us": 0,
+        "frames_per_trigger": 1
+      }
+    },
+    {
+      "serial_number": "CP0E753000BN",
+      "config": {
+        "mode": "SECONDARY_SYNCED",
+        "color_delay_us": 0,
+        "depth_delay_us": 0,
+        "trigger_out_enable": false,
+        "trigger_out_delay_us": 0,
+        "frames_per_trigger": 1
+      }
+    }
+  ]
+}
