@@ -18,7 +18,7 @@ VIDEO_EXT = '.mp4'
 VIDEO_FPS = 15.0
 
 # 同步配置文件路径
-CONFIG_FILE_PATH = "multi_device_sync_config.json"
+CONFIG_FILE_PATH = "/Users/psy/workspace/GalaxeaLeRobotToolkit/utils/multi_device_sync_config.json"
 
 
 def sync_mode_from_str(sync_mode_str):
@@ -140,13 +140,36 @@ def main():
     
     # 标记是否保存数据 (默认为True，Ctrl+X时改为False)
     save_data_flag = True
-    
-    # 为每台相机初始化录制器
+
     for i in range(device_list.get_count()):
-        device = device_list.get_device_by_index(i)
-        serial = device.get_device_info().get_serial_number()
-        
+        try:
+            # 1. 先尝试获取设备对象
+            # 如果这行报错，说明是系统内置相机或权限被占用，直接跳过
+            device = device_list.get_device_by_index(i)
+            
+            # 2. 获取设备信息进行二次确认
+            info = device.get_device_info()
+            name = info.get_name()
+            serial = info.get_serial_number()
+            
+            # 3. 过滤非奥比中光设备（可选，但建议保留）
+            if "FaceTime" in name or "Apple" in name:
+                print(f"⏭️  跳过内置设备: {name}")
+                continue
+                
+        except Exception as e:
+            # 这里会捕获到 uvc_open failed: -3
+            print(f"⚠️  跳过无法访问的设备 (索引 {i}): {e}")
+            continue
+
         print(f"\n🎯 正在初始化相机 {i} (SN: {serial})...")
+
+    # # 为每台相机初始化录制器
+    # for i in range(device_list.get_count()):
+    #     device = device_list.get_device_by_index(i)
+    #     serial = device.get_device_info().get_serial_number()
+        
+    #     print(f"\n🎯 正在初始化相机 {i} (SN: {serial})...")
         
         # 相机独立目录
         cam_dir = os.path.join(session_dir, f"cam_{serial}")
