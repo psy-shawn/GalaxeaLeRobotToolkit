@@ -2,10 +2,14 @@
 """
 自动生成 raw_data_meta.json 文件
 遍历目录结构,为每个包含mcap文件的子目录创建对应的元数据文件
+用法：
+    python generate_raw_data_meta.py [root_directory]
+如果未指定 root_directory，则使用脚本所在目录。 
 """
 import os
 import json
 import yaml
+import re
 from pathlib import Path
 
 def find_mcap_folders(root_dir):
@@ -33,25 +37,29 @@ def create_raw_data_meta(folder_path, raw_folders):
     为指定文件夹创建 raw_data_meta.json
     """
     # 从路径中提取数据集名称
-    # 例如: /path/pick/pick_empty_papercup/dual -> pick_empty_papercup_dual
+    # 例如: path = "/Users/psy/workspace/data/r1lite/20260203/pick_3_bottles_and_place_it_into_trashbin/left_arm/order_low_mid_tall"
+    # dataset_name = "pick_3_bottles_and_place_it_into_trashbin"
+    # annotations.text = "pick 3 bottles and place it into trashbin left arm order low mid tall"
     path_parts = Path(folder_path).parts
-    
-    # 查找关键路径部分
+
+    # 查找日期目录(YYYYMMDD)，提取日期后的一级目录名作为数据集名称
+    dataset_name = os.path.basename(folder_path)
+    annotation_text = ''
     try:
-        # 提取任务名称 (如 pick_empty_papercup) 和模式 (如 dual/left/right)
-        dataset_parts = []
-        for part in reversed(path_parts):
-            if part in ['dual', 'left', 'right', 'interact']:
-                dataset_parts.insert(0, part)
-            elif part.startswith('pick') or part.startswith('stack') or \
-                 part.startswith('take') or part.startswith('open') or \
-                 part.startswith('place'):
-                dataset_parts.insert(0, part)
-                break
-        
-        dataset_name = '_'.join(dataset_parts) if dataset_parts else 'unknown'
-    except:
+        date_index = next(
+            i for i, part in enumerate(path_parts)
+            if re.match(r'^\d{8}$', part)
+        )
+        if date_index + 1 < len(path_parts):
+            dataset_name = path_parts[date_index + 1]
+
+        # 使用日期后的路径生成 annotations.text
+        text_parts = path_parts[date_index + 1:]
+        annotation_text = ' '.join(p.replace('_', ' ') for p in text_parts if p)
+    except StopIteration:
+        # 未找到日期目录时，退化为使用当前目录名
         dataset_name = os.path.basename(folder_path)
+        annotation_text = dataset_name.replace('_', ' ')
     
     raw_data_list = []
     
@@ -117,7 +125,7 @@ def create_raw_data_meta(folder_path, raw_folders):
                 
                 # 构建 annotation
                 annotation = {
-                    "text": task_name,
+                    "text": annotation_text or task_name,
                     "actionQualityLabel": "unqualified" if fail_label else "qualified",
                     "startSecond": start_second,
                     "startNanoSecond": start_nanosecond,
@@ -144,7 +152,13 @@ def create_raw_data_meta(folder_path, raw_folders):
     return raw_data_meta
 
 def main():
-    root_dir = os.path.dirname(os.path.abspath(__file__))
+    # 如果没有指定路径,则使用当前脚本所在目录,否则使用指定路径
+    import sys
+    root_dir = ''
+    if len(sys.argv) == 2:
+        root_dir = sys.argv[1]
+    else:
+        root_dir = os.path.dirname(os.path.abspath(__file__))
     print(f"扫描目录: {root_dir}")
     
     # 查找所有包含 mcap 的文件夹
