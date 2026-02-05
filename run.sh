@@ -1,6 +1,6 @@
 #!/bin/bash
-dataset_name=pick_cola_bottle
-input_dir=/Users/psy/workspace/data/r1lite/20260129/pick/pick_cola_bottle
+dataset_name=pick_cola_bottle_by_left_hand
+input_dir=/Users/psy/workspace/data/r1lite/20260129/pick/pick_cola_bottle/left
 output_dir=/Users/psy/workspace/data/lerobot/
 robot_type=R1Lite # options: R1Pro, R1Lite
 
