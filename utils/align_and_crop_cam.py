@@ -1,71 +1,110 @@
 #!/usr/bin/env python3
 """
-Align external camera timestamps (CSV nanoseconds) to an episode metadata start time
-and crop the external RGB MP4 and copy corresponding depth frames.
-
-Example (depth as images):
-  python align_and_crop_cam.py \
-    --metadata /home/r1lite/OpenGalaxea/GalaxeaDataset/20260120/pick/pick_tissue_box/RB251106042_20260120222037424_RAW/metadata.yaml \
-    --csv /home/r1lite/recordings/cam_CP0E753000AH_20260127_234055/timestamps.csv \
-    --rgb /home/r1lite/recordings/cam_CP0E753000AH_20260127_234055/rgb_video.mp4 \
-    --depth /home/r1lite/recordings/cam_CP0E753000AH_20260127_234055/depth_raw \
-    --out_video ./rgb_cropped.mp4 \
-    --out_depth ./depth_cropped \
-    --ext_fps 15 \
-    --dry_run
-
-Example (depth as video):
-  python align_and_crop_cam.py \
-    --metadata /home/r1lite/OpenGalaxea/GalaxeaDataset/20260120/pick/pick_tissue_box/RB251106042_20260120222037424_RAW/metadata.yaml \
-    --csv /home/r1lite/recordings/cam_CP0E753000AH_20260127_234055/timestamps.csv \
-    --rgb /home/r1lite/recordings/cam_CP0E753000AH_20260127_234055/rgb_video.mp4 \
-    --depth /home/r1lite/recordings/cam_CP0E753000AH_20260127_234055/depth_video.mp4 \
-    --out_video ./rgb_cropped.mp4 \
-    --out_depth ./depth_cropped.mp4 \
-    --ext_fps 15 \
-    --depth_is_video \
-    --dry_run
-
-Notes:
-- CSV must contain columns: Frame_Index,System_Timestamp_ns (nanoseconds since epoch)
-- metadata.yaml must contain starting_time.nanoseconds_since_epoch (or files[0].starting_time...)
-- For depth images: filenames are assumed numeric (e.g. 000001.png). Script tries to detect padding and 0/1 base.
-- For depth video: use --depth_is_video flag, output will also be a video file.
+批量对齐外部相机数据到原始机器人数据
+自动查找匹配的相机目录并裁剪视频到对应时间段
 """
 import argparse
 import csv
 import os
 import subprocess
 import sys
+import time
 import yaml
+from datetime import datetime
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+import glob
 
-def read_metadata_start_ns(metadata_path: str) -> Tuple[int, int]:
+
+def read_metadata_start_ns(metadata_path: str) -> Tuple[int, Optional[int]]:
+    """读取 metadata.yaml 中的开始时间和持续时间"""
     with open(metadata_path, 'r') as f:
         meta = yaml.safe_load(f)
     rbi = meta.get('rosbag2_bagfile_information', {})
-    # Try common locations
+    
     start_ns = None
     duration_ns = None
+    
     if 'starting_time' in rbi and isinstance(rbi['starting_time'], dict):
         start_ns = rbi['starting_time'].get('nanoseconds_since_epoch') or rbi['starting_time'].get('nanoseconds')
+    
     if start_ns is None:
         files = rbi.get('files', [])
         if files and isinstance(files, list) and 'starting_time' in files[0]:
             start_ns = files[0]['starting_time'].get('nanoseconds_since_epoch') or files[0]['starting_time'].get('nanoseconds')
             duration_ns = files[0]['duration'].get('nanoseconds') if 'duration' in files[0] else None
-    # fallback duration in top-level
+    
     if duration_ns is None:
         dur = rbi.get('duration')
         if dur and 'nanoseconds' in dur:
             duration_ns = dur['nanoseconds']
+    
     if start_ns is None:
         raise RuntimeError(f"cannot find starting_time in {metadata_path}")
+    
     return int(start_ns), int(duration_ns) if duration_ns is not None else None
 
-def read_csv_timestamps(csv_path: str) -> List[Tuple[int,int]]:
-    # returns list of (frame_index, system_ts_ns)
+
+def parse_cam_dir_timestamp(dirname: str) -> Optional[int]:
+    """解析相机目录名称中的时间戳 (YYYYMMDD_HHMMSS)"""
+    try:
+        dt = datetime.strptime(dirname, "%Y%m%d_%H%M%S")
+        return int(time.mktime(dt.timetuple()))
+    except Exception:
+        return None
+
+
+def is_camera_dir_complete(cam_dir: Path, subdir: str) -> bool:
+    """检查相机子目录是否包含所有必需文件"""
+    d = cam_dir / subdir
+    return (d / 'timestamps.csv').exists() and \
+           ((d / 'rgb_video.mp4').exists() or (d / 'rgb_video.MP4').exists()) and \
+           ((d / 'depth_video.mp4').exists() or (d / 'depth_video.MP4').exists())
+
+
+def find_matching_camera_dir(metadata_path: str, camera_base: Path, 
+                             max_time_diff: int, top_subdir: str, 
+                             left_subdir: str) -> Optional[Path]:
+    """查找时间匹配的相机目录"""
+    try:
+        start_ns, _ = read_metadata_start_ns(metadata_path)
+        raw_ts = int(start_ns // 1_000_000_000)
+    except Exception as e:
+        print(f"  Warning: cannot read timestamp from {metadata_path}: {e}")
+        return None
+    
+    if not camera_base.exists():
+        return None
+    
+    best_dir = None
+    best_diff = None
+    
+    for item in sorted(camera_base.iterdir()):
+        if not item.is_dir():
+            continue
+        
+        cam_ts = parse_cam_dir_timestamp(item.name)
+        if cam_ts is None:
+            continue
+        
+        diff = abs(cam_ts - raw_ts)
+        if diff > max_time_diff:
+            continue
+        
+        # 至少一个相机目录完整才可用
+        if not (is_camera_dir_complete(item, top_subdir) or 
+                is_camera_dir_complete(item, left_subdir)):
+            continue
+        
+        if best_diff is None or diff < best_diff:
+            best_diff = diff
+            best_dir = item
+    
+    return best_dir
+
+
+def read_csv_timestamps(csv_path: str) -> List[Tuple[int, int]]:
+    """读取 CSV 时间戳文件，返回 (frame_index, system_ts_ns) 列表"""
     rows = []
     with open(csv_path, newline='') as f:
         dr = csv.DictReader(f)
@@ -76,229 +115,251 @@ def read_csv_timestamps(csv_path: str) -> List[Tuple[int,int]]:
     rows.sort(key=lambda x: x[0])
     return rows
 
-def compute_rel_seconds(rows: List[Tuple[int,int]], start_ns: int):
-    # returns list of dicts with frame_index, sys_ns, rel_s
-    out = []
-    for fi, sys_ns in rows:
-        rel = (sys_ns - start_ns) / 1e9
-        out.append({'frame_index': fi, 'sys_ns': sys_ns, 'rel_s': rel})
-    return out
 
-def detect_depth_naming(depth_dir: Path):
-    files = sorted([p.name for p in depth_dir.iterdir() if p.is_file()])
-    if not files:
-        raise RuntimeError(f"no files found in {depth_dir}")
-    # find first numeric filename part
-    for name in files:
-        stem = Path(name).stem
-        if stem.isdigit():
-            pad = len(stem)
-            first_val = int(stem)
-            return pad, first_val
-    # fallback: try parse filename like 000001.png by stripping ext
-    raise RuntimeError("no numeric depth filenames detected")
-
-def is_video_file(path: Path) -> bool:
-    """Check if the path is a video file (by extension)."""
-    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv', '.wmv'}
-    return path.suffix.lower() in video_extensions
-
-
-def find_start_end_indices(rel_list, start_offset=0.0, end_offset=None, duration_s=None):
-    # rel_list: list of dicts with rel_s; may not overlap with [0,duration]
-    # We'll pick the nearest frames to start_offset and to end_time_limit (fallback)
-    if not rel_list:
-        raise RuntimeError("empty rel_list")
-    # sort by rel_s to be safe
-    rel_sorted = sorted(rel_list, key=lambda e: e['rel_s'])
-    times = [e['rel_s'] for e in rel_sorted]
-    frames = [e['frame_index'] for e in rel_sorted]
-    import bisect
-
-    # determine time limit for end
-    if end_offset is not None:
-        end_time_limit = end_offset
-    elif duration_s is not None:
-        end_time_limit = duration_s
+def compute_frame_range(csv_rows: List[Tuple[int, int]], start_ns: int, 
+                       duration_ns: Optional[int], ext_fps: float) -> Optional[Tuple[int, int]]:
+    """计算需要裁剪的帧范围
+    
+    返回 (start_frame, end_frame) 或 None（如果无有效帧）
+    改进逻辑：允许相机时间与元数据时间有偏移
+    """
+    if not csv_rows:
+        return None
+    
+    # 计算所有帧相对于开始时间的偏移（秒）
+    frame_times = []
+    for fi, sys_ns in csv_rows:
+        rel_s = (sys_ns - start_ns) / 1e9
+        frame_times.append((fi, rel_s))
+    
+    # 按相对时间排序
+    frame_times.sort(key=lambda x: x[1])
+    
+    # 确定结束时间限制
+    if duration_ns is not None:
+        end_time_limit = duration_ns / 1e9
     else:
         end_time_limit = float('inf')
+    
+    # 策略：找到与 [0, duration] 有交集的帧
+    # 如果所有帧都在元数据时间之前或之后，尝试使用最接近的帧
+    valid_frames = [(fi, t) for fi, t in frame_times if 0 <= t <= end_time_limit]
+    
+    if valid_frames:
+        start_frame = valid_frames[0][0]
+        end_frame = valid_frames[-1][0]
+        return (start_frame, end_frame)
+    
+    # 如果没有完全重叠的帧，尝试找最接近的
+    # 情况1：所有帧都在元数据之前（相机提前录制）
+    if all(t < 0 for _, t in frame_times):
+        # 使用最后几帧（最接近开始时间）
+        start_idx = max(0, len(frame_times) - int(duration_ns / 1e9 * ext_fps) if duration_ns else 0)
+        start_frame = frame_times[start_idx][0]
+        end_frame = frame_times[-1][0]
+        print(f"  Warning: all camera frames before metadata start, using last {end_frame - start_frame + 1} frames")
+        return (start_frame, end_frame)
+    
+    # 情况2：所有帧都在元数据之后（相机延迟录制）
+    if all(t > end_time_limit for _, t in frame_times):
+        # 使用前几帧
+        end_idx = min(len(frame_times), int(duration_ns / 1e9 * ext_fps) if duration_ns else len(frame_times))
+        start_frame = frame_times[0][0]
+        end_frame = frame_times[end_idx - 1][0]
+        print(f"  Warning: all camera frames after metadata end, using first {end_frame - start_frame + 1} frames")
+        return (start_frame, end_frame)
+    
+    # 情况3：部分重叠，使用重叠部分
+    overlapping = [(fi, t) for fi, t in frame_times if t < end_time_limit]
+    if overlapping:
+        # 找最接近0的帧作为起始
+        closest_to_start = min(overlapping, key=lambda x: abs(x[1]))
+        start_idx = frame_times.index(closest_to_start)
+        start_frame = frame_times[start_idx][0]
+        end_frame = overlapping[-1][0]
+        return (start_frame, end_frame)
+    
+    return None
 
-    # find start: first frame with rel_s >= start_offset, else nearest (last frame before or closest)
-    pos = bisect.bisect_left(times, start_offset)
-    if pos < len(times):
-        start_idx = frames[pos]
-    else:
-        # all frames are before start_offset -> pick last frame
-        start_idx = frames[-1]
 
-    # find end: last frame with rel_s <= end_time_limit, else nearest (first after or closest)
-    pos_end = bisect.bisect_right(times, end_time_limit) - 1
-    if pos_end >= 0:
-        end_idx = frames[pos_end]
-    else:
-        # all frames are after end_time_limit -> pick first frame
-        end_idx = frames[0]
-
-    # if the selected end is before start, try to pick nearest frames by absolute difference
-    if end_idx < start_idx:
-        # compute nearest indices to start_offset and end_time_limit by absolute diff
-        start_diff_idx = min(range(len(times)), key=lambda i: abs(times[i] - start_offset))
-        end_diff_idx = min(range(len(times)), key=lambda i: abs(times[i] - end_time_limit))
-        start_idx = frames[start_diff_idx]
-        end_idx = frames[end_diff_idx]
-
-    if end_idx < start_idx:
-        raise RuntimeError("end frame is before start frame after alignment (even after fallback)")
-    return start_idx, end_idx
-
-def ffmpeg_crop(input_mp4: str, start_time: float, duration: float, out_mp4: str, dry_run=False):
-    # Use -ss START -i INPUT -t DURATION -c copy OUT for faster copy (may be keyframe related)
+def crop_video(input_video: Path, start_frame: int, end_frame: int, 
+              output_video: Path, ext_fps: float, is_depth: bool = False) -> bool:
+    """裁剪视频到指定帧范围"""
+    start_time = start_frame / ext_fps
+    duration = (end_frame - start_frame + 1) / ext_fps
+    
     cmd = [
-        'ffmpeg', '-y',
+        'ffmpeg', '-y', '-loglevel', 'error',
         '-ss', f'{start_time:.6f}',
-        '-i', input_mp4,
+        '-i', str(input_video),
         '-t', f'{duration:.6f}',
         '-c', 'copy',
-        out_mp4
+        str(output_video)
     ]
-    print("ffmpeg command:", ' '.join(cmd))
-    if dry_run:
-        return
-    subprocess.check_call(cmd)
+    
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"  Error cropping {'depth' if is_depth else 'RGB'} video: {e.stderr}")
+        return False
 
-def ffmpeg_depth_crop(input_video: str, start_time: float, duration: float, out_video: str, dry_run=False):
-    # Crop depth video (16-bit grayscale) using re-encoding for precise frame handling
-    # -pix_fmt gray16le ensures 16-bit grayscale output for depth data
-    cmd = [
-        'ffmpeg', '-y',
-        '-ss', f'{start_time:.6f}',
-        '-i', input_video,
-        '-t', f'{duration:.6f}',
-        '-c', 'copy',
-        out_video
-    ]
-    print("depth ffmpeg command:", ' '.join(cmd))
-    if dry_run:
-        return
-    subprocess.check_call(cmd)
 
-def copy_depth_frames(depth_dir: Path, out_dir: Path, start_frame: int, end_frame: int, pad: int, first_val: int, dry_run=False):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # Determine whether file index base is 0 or 1 by comparing first_val
-    base_offset = 0 if first_val == 0 else 1
-    for frame in range(start_frame, end_frame + 1):
-        file_index = frame + base_offset
-        fname = f"{file_index:0{pad}d}.png"
-        src = depth_dir / fname
-        if not src.exists():
-            # warn and continue
-            print(f"warning: depth file missing: {src}")
-            continue
-        dst = out_dir / fname
-        print(f"copy {src} -> {dst}")
-        if not dry_run:
-            import shutil
-            shutil.copy2(src, dst)
+def process_single_raw(raw_json: Path, data_root: Path, cam_root: Path,
+                      top_cam_subdir: str, left_cam_subdir: str,
+                      ext_fps: float, max_time_diff: int) -> dict:
+    """处理单个 RAW 数据的相机对齐"""
+    result = {'raw': str(raw_json), 'status': 'skip', 'reason': ''}
+    
+    raw_parent = raw_json.parent
+    rel_path = raw_parent.relative_to(data_root)
+    raw_base = raw_json.stem
+    
+    # 检查 metadata
+    metadata_yaml = raw_parent / raw_base / 'metadata.yaml'
+    if not metadata_yaml.exists():
+        result['reason'] = 'metadata missing'
+        return result
+    
+    # 查找匹配的相机目录
+    camera_base = cam_root / rel_path
+    camera_dir = find_matching_camera_dir(str(metadata_yaml), camera_base,
+                                         max_time_diff, top_cam_subdir, left_cam_subdir)
+    
+    if camera_dir is None:
+        result['reason'] = f'no matching camera dir in {camera_base}'
+        return result
+    
+    print(f"\n✓ Matched: {raw_base} <-> {camera_dir.name}")
+    
+    # 读取元数据时间
+    try:
+        start_ns, duration_ns = read_metadata_start_ns(str(metadata_yaml))
+    except Exception as e:
+        result['reason'] = f'cannot read metadata: {e}'
+        return result
+    
+    # 创建输出目录
+    out_top_dir = raw_parent / 'extra_cam' / 'top'
+    out_left_dir = raw_parent / 'extra_cam' / 'left'
+    out_top_dir.mkdir(parents=True, exist_ok=True)
+    out_left_dir.mkdir(parents=True, exist_ok=True)
+    
+    processed_count = 0
+    
+    # 处理俯视相机
+    top_cam_dir = camera_dir / top_cam_subdir
+    if is_camera_dir_complete(camera_dir, top_cam_subdir):
+        print(f"  Processing TOP camera...")
+        if process_camera(top_cam_dir, metadata_yaml, start_ns, duration_ns,
+                         out_top_dir, ext_fps):
+            processed_count += 1
+    
+    # 处理左视相机
+    left_cam_dir = camera_dir / left_cam_subdir
+    if is_camera_dir_complete(camera_dir, left_cam_subdir):
+        print(f"  Processing LEFT camera...")
+        if process_camera(left_cam_dir, metadata_yaml, start_ns, duration_ns,
+                         out_left_dir, ext_fps):
+            processed_count += 1
+    
+    if processed_count > 0:
+        result['status'] = 'success'
+        result['reason'] = f'{processed_count} camera(s) processed'
+    else:
+        result['reason'] = 'no cameras processed successfully'
+    
+    return result
+
+
+def process_camera(cam_dir: Path, metadata_yaml: Path, start_ns: int,
+                  duration_ns: Optional[int], output_dir: Path, ext_fps: float) -> bool:
+    """处理单个相机目录"""
+    csv_path = cam_dir / 'timestamps.csv'
+    rgb_video = cam_dir / 'rgb_video.mp4'
+    depth_video = cam_dir / 'depth_video.mp4'
+    
+    # 读取 CSV 时间戳
+    try:
+        csv_rows = read_csv_timestamps(str(csv_path))
+    except Exception as e:
+        print(f"    Error reading CSV: {e}")
+        return False
+    
+    # 计算帧范围
+    frame_range = compute_frame_range(csv_rows, start_ns, duration_ns, ext_fps)
+    if frame_range is None:
+        print(f"    Warning: no valid frame range found")
+        return False
+    
+    start_frame, end_frame = frame_range
+    print(f"    Frame range: {start_frame} - {end_frame} ({end_frame - start_frame + 1} frames)")
+    
+    # 裁剪 RGB 视频
+    out_rgb = output_dir / 'rgb_cropped.mp4'
+    if not crop_video(rgb_video, start_frame, end_frame, out_rgb, ext_fps, is_depth=False):
+        return False
+    
+    # 裁剪深度视频
+    out_depth = output_dir / 'depth_cropped.mp4'
+    if not crop_video(depth_video, start_frame, end_frame, out_depth, ext_fps, is_depth=True):
+        return False
+    
+    print(f"    ✓ Saved to {output_dir}")
+    return True
+
+
+def batch_process(data_root: str, cam_root: str, top_cam_subdir: str,
+                 left_cam_subdir: str, ext_fps: float, max_time_diff: int):
+    """批量处理所有 RAW 数据"""
+    data_root = Path(data_root)
+    cam_root = Path(cam_root)
+    
+    # 查找所有 *_RAW.json 文件
+    raw_jsons = sorted(data_root.glob('**/*_RAW.json'))
+    
+    print(f"Found {len(raw_jsons)} RAW datasets to process\n")
+    print("=" * 80)
+    
+    results = []
+    for raw_json in raw_jsons:
+        result = process_single_raw(raw_json, data_root, cam_root,
+                                   top_cam_subdir, left_cam_subdir,
+                                   ext_fps, max_time_diff)
+        results.append(result)
+    
+    # 统计结果
+    success_count = sum(1 for r in results if r['status'] == 'success')
+    skip_count = len(results) - success_count
+    
+    print("\n" + "=" * 80)
+    print(f"Summary: {success_count} succeeded, {skip_count} skipped")
+    
+    # 显示跳过的原因统计
+    if skip_count > 0:
+        print("\nSkipped reasons:")
+        from collections import Counter
+        reasons = Counter(r['reason'] for r in results if r['status'] == 'skip')
+        for reason, count in reasons.most_common():
+            print(f"  - {reason}: {count}")
+
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Align external camera CSV timestamps to metadata start and crop RGB+depth.")
-    p.add_argument('--metadata', required=True, help='path to metadata.yaml (episode to use as start)')
-    p.add_argument('--csv', required=True, help='external camera timestamps CSV (Frame_Index,System_Timestamp_ns,...)')
-    p.add_argument('--rgb', required=True, help='external RGB mp4 path')
-    p.add_argument('--depth', required=True, help='depth input: either a directory with depth images (numeric names like 000001.png) or a depth video file (.mp4)')
-    p.add_argument('--out_video', required=True, help='output cropped RGB mp4 path')
-    p.add_argument('--out_depth', required=True, help='output: either directory for cropped depth frames OR output video path (if --depth_is_video)')
-    p.add_argument('--ext_fps', type=float, default=30.0, help='external camera FPS (default 30)')
-    p.add_argument('--start_offset', type=float, default=0.0, help='seconds after episode start to begin crop (default 0)')
-    p.add_argument('--end_offset', type=float, default=None, help='seconds after episode start to end crop (default: metadata duration)')
-    p.add_argument('--depth_is_video', action='store_true', help='treat --depth as a video file instead of image directory')
-    p.add_argument('--dry_run', action='store_true', help='do not run ffmpeg or copy files, just print actions')
+    p = argparse.ArgumentParser(description="批量对齐外部相机数据到原始机器人数据")
+    p.add_argument('--data-root', required=True, help='原始数据根目录')
+    p.add_argument('--cam-root', required=True, help='外部相机数据根目录')
+    p.add_argument('--top-cam-subdir', default='cam_CP0E753000BN', help='俯视相机子目录名')
+    p.add_argument('--left-cam-subdir', default='cam_CP0E753000AH', help='左视相机子目录名')
+    p.add_argument('--ext-fps', type=float, default=15.0, help='外部相机帧率')
+    p.add_argument('--max-time-diff', type=int, default=60, help='允许的最大时间差（秒）')
     return p.parse_args()
+
 
 def main():
     args = parse_args()
-    metadata = Path(args.metadata)
-    csvp = Path(args.csv)
-    rgbp = Path(args.rgb)
-    depth_input = Path(args.depth)
-    out_video = Path(args.out_video)
-    out_depth = Path(args.out_depth)
+    batch_process(args.data_root, args.cam_root, args.top_cam_subdir,
+                 args.left_cam_subdir, args.ext_fps, args.max_time_diff)
 
-    start_ns, duration_ns = read_metadata_start_ns(str(metadata))
-    duration_s = (duration_ns / 1e9) if duration_ns else None
-    print(f"episode start_ns={start_ns} ({start_ns/1e9:.6f}s since epoch), duration_s={duration_s}")
-
-    rows = read_csv_timestamps(str(csvp))
-    rel = compute_rel_seconds(rows, start_ns)
-
-    # debug show sample
-    print(f"CSV rows read: {len(rel)}. sample: {rel[0] if rel else 'empty'}")
-
-    # determine start/end frame indices
-    start_frame, end_frame = find_start_end_indices(rel, start_offset=args.start_offset, end_offset=args.end_offset, duration_s=duration_s)
-    print(f"determined frames: start_frame={start_frame}, end_frame={end_frame}")
-
-    # compute ffmpeg times (relative to external video start)
-    start_time = start_frame / float(args.ext_fps)
-    duration = (end_frame - start_frame + 1) / float(args.ext_fps)
-    print(f"FFmpeg will crop from {start_time:.6f}s for duration {duration:.6f}s (ext_fps={args.ext_fps})")
-
-    if args.dry_run:
-        print("DRY RUN: no ffmpeg or file operations will be executed.")
-
-    # Process RGB video
-    ffmpeg_crop(str(rgbp), start_time, duration, str(out_video), dry_run=args.dry_run)
-
-    # Process depth: either as video or as image directory
-    if args.depth_is_video:
-        # Depth is a video file, crop it similarly
-        if not is_video_file(depth_input):
-            raise RuntimeError(f"depth_is_video is set but --depth is not a video file: {depth_input}")
-        depth_output = out_depth  # out_depth is the output video path
-        print(f"Cropping depth video: {depth_input} -> {depth_output}")
-        ffmpeg_crop(str(depth_input), start_time, duration, str(depth_output), dry_run=args.dry_run)
-        print("done. outputs:")
-        print("  video ->", out_video)
-        print("  depth video ->", depth_output)
-    else:
-        # Depth is a directory of images
-        if not depth_input.is_dir():
-            raise RuntimeError(f"--depth is not a directory: {depth_input}")
-        # depth frames copy: detect pad & base
-        pad, first_val = detect_depth_naming(depth_input)
-        print(f"detected depth naming pad={pad}, first_val={first_val}")
-        copy_depth_frames(depth_input, out_depth, start_frame, end_frame, pad, first_val, dry_run=args.dry_run)
-        print("done. outputs:")
-        print("  video ->", out_video)
-        print("  depth dir ->", out_depth)
 
 if __name__ == '__main__':
     main()
-
-"""
-# Example usage with depth as images:
-
-cd /Users/hsong/repos/scripts
-
-VIDEO_DIR=/Users/hsong/repos/scripts/recordings/20260202/pick_3_bottles_and_place_them_into_trashbin/left_arm/order_low_tall_mid/20260202_231415
-python3 align_and_crop_cam.py \
-  --metadata $VIDEO_DIR/metadata.yaml \
-  --csv $VIDEO_DIR/cam_CP0E753000AH/timestamps.csv \
-  --rgb $VIDEO_DIR/cam_CP0E753000AH/rgb_video.mp4 \
-  --depth_is_video \
-  --depth $VIDEO_DIR/cam_CP0E753000AH/depth_video.mp4 \
-  --out_video $VIDEO_DIR/cam_CP0E753000AH/aligned_rgb.mp4 \
-  --out_depth $VIDEO_DIR/cam_CP0E753000AH/aligned_depth.mp4 \
-  --ext_fps 15
-
-python3 align_and_crop_cam.py \
-  --metadata $VIDEO_DIR/metadata.yaml \
-  --csv $VIDEO_DIR/cam_CP0E753000BN/timestamps.csv \
-  --rgb $VIDEO_DIR/cam_CP0E753000BN/rgb_video.mp4 \
-  --depth_is_video \
-  --depth $VIDEO_DIR/cam_CP0E753000BN/depth_video.mp4 \
-  --out_video $VIDEO_DIR/cam_CP0E753000BN/aligned_rgb.mp4 \
-  --out_depth $VIDEO_DIR/cam_CP0E753000BN/aligned_depth.mp4 \
-  --ext_fps 15
-
-"""

@@ -365,13 +365,31 @@ def copy_videos(source_folders, output_folder, episode_mapping):
 
     print(f"Found video keys: {video_keys}")
 
+    # Also collect all video directories from source folders (including external cameras not in features)
+    all_video_dirs = set()
+    for source_folder in source_folders:
+        videos_dir = os.path.join(source_folder, "videos")
+        if os.path.exists(videos_dir):
+            for chunk_dir in os.listdir(videos_dir):
+                chunk_path = os.path.join(videos_dir, chunk_dir)
+                if os.path.isdir(chunk_path) and chunk_dir.startswith("chunk-"):
+                    for video_key_dir in os.listdir(chunk_path):
+                        video_key_path = os.path.join(chunk_path, video_key_dir)
+                        if os.path.isdir(video_key_path):
+                            all_video_dirs.add(video_key_dir)
+    
+    # Combine feature-defined videos and discovered video directories
+    all_video_keys = list(set(video_keys) | all_video_dirs)
+    if len(all_video_dirs) > len(video_keys):
+        print(f"Found additional video directories (e.g., external cameras): {all_video_dirs - set(video_keys)}")
+
     # Copy videos for each episode
     for old_folder, old_index, new_index in episode_mapping:
         # Determine episode chunk (usually 0 for small datasets)
         episode_chunk = old_index // info["chunks_size"]
         new_episode_chunk = new_index // info["chunks_size"]
 
-        for video_key in video_keys:
+        for video_key in all_video_keys:
             # Try different possible source paths
             source_patterns = [
                 # Standard path with the episode index from metadata
