@@ -282,7 +282,6 @@ class DataConverter:
             "shape": self.shape_of_images["WRIST_RIGHT_RGB"],
             "names": ["height", "width", "channels"],
         }
-        # NOTE: External camera videos are handled separately (stored as video files, not in features)
 
         # Arm Joints
         arm_feat = {
@@ -462,13 +461,6 @@ class DataConverter:
             }
         features["action.right_arm"]["names"] = [JOINT_ACTION_RIGHT_TOPIC+f".position[{i}]" for i in range(self.arm_dof)]
         
-        # Task description (string type requires shape (1,) for HuggingFace datasets)
-        features["task"] = {
-            "dtype": "string",
-            "shape": (1,),
-            "names": None
-        }
-        
         return features
 
     def process_all(self, mcaps_dict: dict):
@@ -512,14 +504,18 @@ class DataConverter:
         start_time = time.time()
         mcap_path = mcap_info["path"]
         processed_msgs = self.extract(mcap_path)
-        
-        # Check for external camera videos
+
+        # Check for external camera videos (RGB and depth)
+        # New structure: extra_cam/{mcap_name}/top or left
         mcap_dir = Path(mcap_path).parent.parent
-        extra_cam_top_dir = mcap_dir / 'extra_cam' / 'top'
-        extra_cam_left_dir = mcap_dir / 'extra_cam' / 'left'
+        mcap_name = Path(mcap_path).parent.name  # Get mcap folder name
+        extra_cam_top_dir = mcap_dir / 'extra_cam' / mcap_name / 'top'
+        extra_cam_left_dir = mcap_dir / 'extra_cam' / mcap_name / 'left'
         
-        has_external_top = (extra_cam_top_dir / 'rgb_cropped.mp4').exists()
-        has_external_left = (extra_cam_left_dir / 'rgb_cropped.mp4').exists()
+        has_external_top_rgb = (extra_cam_top_dir / 'rgb_cropped.mp4').exists()
+        has_external_left_rgb = (extra_cam_left_dir / 'rgb_cropped.mp4').exists()
+        has_external_top_depth = (extra_cam_top_dir / 'depth_cropped.mp4').exists()
+        has_external_left_depth = (extra_cam_left_dir / 'depth_cropped.mp4').exists()
         
         head_rgb_timestamps = np.array([self.msg_to_timestamp(msg) for msg in processed_msgs[RGB_HEAD_LEFT_TOPIC]])
         fps = int(np.round(1.0 / np.median(head_rgb_timestamps[1:] - head_rgb_timestamps[:-1])))
@@ -693,21 +689,33 @@ class DataConverter:
                     joint_dict['velocity'] = velocities[index_array[i]:index_array[i+1]]
                     joint_dict_list.append(joint_dict)
                 processed_msgs[topic] = joint_dict_list
-        
-        # NOTE: External camera videos are not loaded into memory
-        # They will be copied directly to the output directory after saving episode
+
         external_camera_videos = {}
-        if has_external_top:
-            top_video_path = extra_cam_top_dir / 'rgb_cropped.mp4'
-            if top_video_path.exists():
-                external_camera_videos['top'] = top_video_path
-                logger.info(f"Found external top camera video: {top_video_path}")
+        # Collect RGB videos
+        if has_external_top_rgb:
+            top_rgb_path = extra_cam_top_dir / 'rgb_cropped.mp4'
+            if top_rgb_path.exists():
+                external_camera_videos['external_top'] = top_rgb_path
+                logger.info(f"Found external top RGB video: {top_rgb_path}")
         
-        if has_external_left:
-            left_video_path = extra_cam_left_dir / 'rgb_cropped.mp4'
-            if left_video_path.exists():
-                external_camera_videos['left'] = left_video_path
-                logger.info(f"Found external left camera video: {left_video_path}")
+        if has_external_left_rgb:
+            left_rgb_path = extra_cam_left_dir / 'rgb_cropped.mp4'
+            if left_rgb_path.exists():
+                external_camera_videos['external_left'] = left_rgb_path
+                logger.info(f"Found external left RGB video: {left_rgb_path}")
+        
+        # Collect depth videos
+        if has_external_top_depth:
+            top_depth_path = extra_cam_top_dir / 'depth_cropped.mp4'
+            if top_depth_path.exists():
+                external_camera_videos['external_top_depth'] = top_depth_path
+                logger.info(f"Found external top depth video: {top_depth_path}")
+        
+        if has_external_left_depth:
+            left_depth_path = extra_cam_left_dir / 'depth_cropped.mp4'
+            if left_depth_path.exists():
+                external_camera_videos['external_left_depth'] = left_depth_path
+                logger.info(f"Found external left depth video: {left_depth_path}")
 
         episode = self.create_episode(processed_msgs)
         features = self.create_features(episode[0])
@@ -771,31 +779,102 @@ class DataConverter:
         if len(episode) != 0:
             time_start = time.time()
             for frame, description, quality in zip(episode, framewise_descriptions, framewise_quality):
-                # Add task information to frame dict for new lerobot API
-                frame["task"] = episode_description
-                # Debug: verify task is in frame
-                if "task" not in frame:
-                    logger.error(f"Task missing in frame! Keys: {frame.keys()}")
-                lerobot_dataset.add_frame(frame)
+                lerobot_dataset.add_frame(
+                    frame=frame,
+                    task=episode_description#[episode_description, description, quality],
+                )
             time_end = time.time()
             logger.info(f"add_frame time: {time_end - time_start} seconds")
             time_start = time.time()
             lerobot_dataset.save_episode()
             time_end = time.time()
             logger.info(f"save_episode time: {time_end - time_start} seconds")
-            
-            # Copy external camera videos to output directory
+
+            # Copy external camera videos immediately in each process
             if external_camera_videos:
-                output_videos_dir = Path(lerobot_dataset.root) / 'videos'
-                output_videos_dir.mkdir(parents=True, exist_ok=True)
-                episode_index = lerobot_dataset.episode_index - 1  # Last saved episode
+                # Update info.json to include external camera features
+                # This bypasses add_frame validation while ensuring features are defined for visualization
+                try:
+                    info_path = Path(lerobot_dataset.root) / "meta/info.json"
+                    if info_path.exists():
+                        with open(info_path, 'r') as f:
+                            info = json.load(f)
+                        
+                        features_updated = False
+                        for cam_name, video_path in external_camera_videos.items():
+                            # Determine if this is a depth or RGB video
+                            is_depth = cam_name.endswith('_depth')
+                            if is_depth:
+                                # For depth: observation.images.{cam_name} (no _rgb suffix)
+                                feat_key = f'observation.images.{cam_name}'
+                            else:
+                                # For RGB: observation.images.{cam_name}_rgb
+                                feat_key = f'observation.images.{cam_name}_rgb'
+                            
+                            if feat_key not in info['features']:
+                                # Try to get actual video dimensions
+                                h, w = 720, 1280 # Fallback
+                                try:
+                                    cap = cv2.VideoCapture(str(video_path))
+                                    if cap.isOpened():
+                                        w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                                        h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                                        cap.release()
+                                except:
+                                    pass
+                                
+                                # Depth videos are single channel
+                                channels = 1 if is_depth else 3
+                                info['features'][feat_key] = {
+                                    "dtype": "video",
+                                    "shape": [h, w, channels],
+                                    "names": ["height", "width", "channels"]
+                                }
+                                features_updated = True
+                        
+                        if features_updated:
+                            with open(info_path, 'w') as f:
+                                json.dump(info, f, indent=4)
+                            logger.info("Updated info.json with external camera features")
+                except Exception as e:
+                    logger.warning(f"Failed to update info.json: {e}")
+
+            # Copy metadata.yaml from mcap directory to meta folder
+            try:
+                mcap_metadata_path = Path(mcap_path).parent / "metadata.yaml"
+                if mcap_metadata_path.exists():
+                    meta_dir = Path(lerobot_dataset.root) / "meta"
+                    meta_dir.mkdir(parents=True, exist_ok=True)
+                    dest_metadata_path = meta_dir / "metadata.yaml"
+                    shutil.copy2(mcap_metadata_path, dest_metadata_path)
+                    logger.info(f"Copied metadata.yaml to {dest_metadata_path}")
+            except Exception as e:
+                logger.warning(f"Failed to copy metadata.yaml: {e}")
+
+            if external_camera_videos:
+                episode_index = 0
+                chunk_index = 0  # Each sub-dataset has only one chunk
                 
                 for cam_name, video_path in external_camera_videos.items():
-                    # Follow lerobot naming convention: episode_{index:06d}_{camera_name}.mp4
-                    output_video = output_videos_dir / f'episode_{episode_index:06d}_{cam_name}.mp4'
-                    shutil.copy2(video_path, output_video)
-                    logger.info(f"Copied {cam_name} camera video to {output_video}")
-            
+                    # Follow lerobot directory structure
+                    # Depth: videos/chunk-{chunk_index:03d}/observation.images.{cam_name}/episode_{episode_index:06d}.mp4
+                    # RGB: videos/chunk-{chunk_index:03d}/observation.images.{cam_name}_rgb/episode_{episode_index:06d}.mp4
+                    is_depth = cam_name.endswith('_depth')
+                    if is_depth:
+                        observation_key = f'observation.images.{cam_name}'
+                    else:
+                        observation_key = f'observation.images.{cam_name}_rgb'
+                    
+                    video_dir = Path(lerobot_dataset.root) / 'videos' / f'chunk-{chunk_index:03d}' / observation_key
+                    video_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    dest_path = video_dir / f'episode_{episode_index:06d}.mp4'
+                    try:
+                        shutil.copy2(video_path, dest_path)
+                        logger.info(f"Copied external camera video: {observation_key} -> {dest_path}")
+                    except Exception as e:
+                        logger.error(f"Failed to copy {video_path} to {dest_path}: {e}")
+
             return (mcap_path, "success")
         else:
             return (mcap_path, "failed")
@@ -809,10 +888,6 @@ class DataConverter:
             frame["observation.images.head_right_rgb"] = processed_dataset[RGB_HEAD_RIGHT_TOPIC][0][i]
             frame["observation.images.left_wrist_rgb"] = processed_dataset[self.RGB_WRIST_LEFT_TOPIC][0][i]
             frame["observation.images.right_wrist_rgb"] = processed_dataset[self.RGB_WRIST_RIGHT_TOPIC][0][i]
-            
-            # NOTE: External camera videos are handled separately (not loaded into frames)
-            
-            # Observation states
             
             frame["observation.state.left_arm"] = processed_dataset[JOINT_OBS_LEFT_TOPIC][0]["position"][i][0: self.arm_dof]
             frame["observation.state.left_arm.velocities"] = processed_dataset[JOINT_OBS_LEFT_TOPIC][0]["velocity"][i][0: self.arm_dof]
@@ -845,9 +920,6 @@ class DataConverter:
                 frame["action.torso"] = processed_dataset[TORSO_ACTION_TOPIC][0]["position"][i]
             if self.robot_type == "r1lite" and len(processed_dataset[TORSO_ACTION_SPEED_TOPIC][0]) > 0:
                 frame["action.torso.velocities"] = processed_dataset[TORSO_ACTION_SPEED_TOPIC][0][i]
-
-            # Add placeholder task (will be updated later with actual task description)
-            frame["task"] = ""
 
             episode.append(frame)
         
@@ -940,47 +1012,6 @@ class DataConverter:
         target_values[target_timestamps >= source_timestamps[-1], 3:] = [quaternions[-1].x, quaternions[-1].y, quaternions[-1].z, quaternions[-1].w]
 
         return target_values
-    
-    def load_video_frames(self, video_path: Path, target_frame_count: int):
-        """Load video frames and resize/pad to match target frame count"""
-        import cv2
-        
-        if not video_path.exists():
-            logger.warning(f"Video not found: {video_path}")
-            return None
-        
-        cap = cv2.VideoCapture(str(video_path))
-        frames = []
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frames.append(frame_rgb)
-        
-        cap.release()
-        
-        if len(frames) == 0:
-            logger.warning(f"No frames loaded from {video_path}")
-            return None
-        
-        frames = np.array(frames)
-        
-        # Match frame count with target
-        if len(frames) != target_frame_count:
-            logger.warning(f"Frame count mismatch: video has {len(frames)}, target is {target_frame_count}")
-            
-            if len(frames) < target_frame_count:
-                # Pad with last frame
-                padding = np.repeat([frames[-1]], target_frame_count - len(frames), axis=0)
-                frames = np.concatenate([frames, padding], axis=0)
-            else:
-                # Truncate
-                frames = frames[:target_frame_count]
-        
-        return frames
     
     def register_quat(self, a):
         a_np = np.array(a)
@@ -1133,13 +1164,6 @@ if __name__ == '__main__':
 
     mcaps_dict = raw_data_meta_json['data']
     dataset_name = mcaps_dict['rawDataSetName']
-    
-    # Check if rawDataList is empty
-    if not mcaps_dict['rawDataList']:
-        logger.error(f"No bag/mcap files found in the input directory!")
-        logger.error(f"Please check if the input_dir contains valid rosbag/mcap files")
-        sys.exit(1)
-    
     robot_type = mcaps_dict['rawDataList'][0]['robotType'].lower()
     sample_mcap_path = mcaps_dict["rawDataList"][0]["path"]
     bag_type = mcaps_dict['rawDataList'][0]['name'].split('.')[-1]
@@ -1166,7 +1190,11 @@ if __name__ == '__main__':
         exit(1)
 
     try:
-        training_data_set_meta_file = os.path.join(output_dir, 'training_data_set_meta.json')
+        # 改进json文件的写入方式，避免在多进程环境下出现文件写入冲突
+        # if not os.path.exists(output_dir + f'/{dataset_name}'):
+        #     os.makedirs(output_dir + f'/{dataset_name}')
+        # training_data_set_meta_file = os.path.join(output_dir, f'{dataset_name}/training_data_set_meta.json')
+        training_data_set_meta_file = os.path.join(output_dir, f'training_data_set_meta.json')
         with open(training_data_set_meta_file, "w", encoding="utf-8") as f:
             json.dump(mcaps_dict, f, indent=4)
     except Exception as e:

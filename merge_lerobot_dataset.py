@@ -1315,15 +1315,28 @@ def merge_datasets(
     # 首先收集所有不同的任务描述
     all_unique_tasks = []
 
-    # 从info.json获取chunks_size
+    # 合并所有子数据集的 features 字段，确保所有 video key 都能被识别
     info_path = os.path.join(source_folders[0], "meta", "info.json")
-    # Check if all source folders have images directory
     images_dir_exists = all(os.path.exists(os.path.join(folder, "images")) for folder in source_folders)
-    chunks_size = 1000  # 默认值
+    chunks_size = 1000
+    merged_features = {}
+    for folder in source_folders:
+        folder_info_path = os.path.join(folder, "meta", "info.json")
+        if os.path.exists(folder_info_path):
+            with open(folder_info_path) as f:
+                folder_info = json.load(f)
+                for k, v in folder_info.get("features", {}).items():
+                    # 如果有重复key，优先保留第一个
+                    if k not in merged_features:
+                        merged_features[k] = v
+    # 以第一个info为模板，合并features
     if os.path.exists(info_path):
         with open(info_path) as f:
             info = json.load(f)
-            chunks_size = info.get("chunks_size", 1000)
+        chunks_size = info.get("chunks_size", 1000)
+        info["features"] = merged_features
+    else:
+        info = {"features": merged_features, "chunks_size": chunks_size}
 
     # 使用更简单的方法计算视频总数 (Use simpler method to calculate total videos)
     total_videos = 0

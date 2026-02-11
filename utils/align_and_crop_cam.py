@@ -239,9 +239,9 @@ def process_single_raw(raw_json: Path, data_root: Path, cam_root: Path,
         result['reason'] = f'cannot read metadata: {e}'
         return result
     
-    # 创建输出目录
-    out_top_dir = raw_parent / 'extra_cam' / 'top'
-    out_left_dir = raw_parent / 'extra_cam' / 'left'
+    # 创建输出目录（按 episode 分子目录，避免覆盖）
+    out_top_dir = raw_parent / 'extra_cam' / raw_base / 'top'
+    out_left_dir = raw_parent / 'extra_cam' / raw_base / 'left'
     out_top_dir.mkdir(parents=True, exist_ok=True)
     out_left_dir.mkdir(parents=True, exist_ok=True)
     
