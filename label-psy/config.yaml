@@ -1,0 +1,46 @@
+# 自动化数据标注配置文件
+
+# VLM API配置
+vlm:
+  # API地址（可选多个模型）
+  api_urls:
+    qwen: "http://api-hub.inner.chj.cloud/llm-gateway/v1/chat/completions/bailian-qwen3-vl-plus"
+    gemini: "http://api-hub.inner.chj.cloud/llm-gateway/v1/chat/completions/gemini-3-pro-preview"
+    gpt: "http://api-hub.inner.chj.cloud/llm-gateway/v1/chat/completions/azure-gpt-5_2"
+  
+  # 默认使用的模型
+  default_model: "qwen"
+    
+  # 重试配置
+  max_retries: 3
+  retry_delay: 2  # 秒
+
+# 视频处理配置
+video:
+  # 抽帧帧率（fps）
+  fps: 1
+  
+  # 网格图配置
+  use_grid: true
+  grid_size: 12  # 网格中包含的帧数
+  
+  # 单帧尺寸（用于网格图）
+  frame_width: 320
+  frame_height: 240
+  
+  # 图像质量
+  jpeg_quality: 85
+
+# 标注配置
+annotation:
+  # 是否自动备份原文件
+  auto_backup: true
+  
+  # 处理配置
+  batch_size: 1  # 批次大小（建议1，避免内存占用过大）
+  delay_between_episodes: 1  # episode之间的延迟（秒）
+
+# 日志配置
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

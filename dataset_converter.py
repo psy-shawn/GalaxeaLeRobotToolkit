@@ -1075,11 +1075,13 @@ def get_args():
     parser.add_argument('--output_dir', required=True, type=str, help='where LeRobot data are saved')
     parser.add_argument('--robot_type', required=True, choices=['R1Pro', 'R1', 'R1Lite'], help='robot type')
     parser.add_argument('--dataset_name', required=True, type=str, help='dataset_name')
+    parser.add_argument('--only_generate_meta', action='store_true', help='only generate training_data_set_meta.json and exit')
 
     return parser.parse_args()
 
 def search_rosbags(input_dir: str):
     path = Path(input_dir)
+    bag_files = []
     try:
         bag_files = list(path.rglob('*.bag'))
     except Exception as e:
@@ -1102,8 +1104,7 @@ def find_raw_data_meta_files(root_dir):
     
     return raw_data_meta_files
 
-def get_raw_data_meta_from_args():
-    args = get_args()
+def get_raw_data_meta_from_args(args):
     dataset_name = args.dataset_name
     robot_type = args.robot_type
     output_dir = args.output_dir
@@ -1160,14 +1161,40 @@ def format_shelf_string(s):
     return result
 
 if __name__ == '__main__':
-    raw_data_meta_json, output_dir = get_raw_data_meta_from_args()
+    args = get_args()
+    raw_data_meta_json, output_dir = get_raw_data_meta_from_args(args)
 
     mcaps_dict = raw_data_meta_json['data']
+    if len(mcaps_dict['rawDataList']) == 0:
+        logger.error("No bag/mcap files found, cannot generate metadata.")
+        exit(1)
+
     dataset_name = mcaps_dict['rawDataSetName']
     robot_type = mcaps_dict['rawDataList'][0]['robotType'].lower()
     sample_mcap_path = mcaps_dict["rawDataList"][0]["path"]
     bag_type = mcaps_dict['rawDataList'][0]['name'].split('.')[-1]
 
+    if robot_type not in ['r1pro', 'r1', 'r1lite']:
+        logger.error(f'Unknown robot type: {robot_type}')
+        exit(1)
+
+    training_data_set_meta_file = os.path.join(output_dir, 'training_data_set_meta.json')
+    try:
+        # 改进json文件的写入方式，避免在多进程环境下出现文件写入冲突
+        # if not os.path.exists(output_dir + f'/{dataset_name}'):
+        #     os.makedirs(output_dir + f'/{dataset_name}')
+        # training_data_set_meta_file = os.path.join(output_dir, f'{dataset_name}/training_data_set_meta.json')
+        with open(training_data_set_meta_file, "w", encoding="utf-8") as f:
+            json.dump(mcaps_dict, f, indent=4)
+        logger.info(f"Generated metadata file: {training_data_set_meta_file}")
+    except Exception as e:
+        logger.error(f'Error writing {training_data_set_meta_file}, {e}')
+
+    if args.only_generate_meta:
+        logger.info("only_generate_meta=True, skip conversion.")
+        exit(0)
+
+    rclpy_module = None
     if bag_type == 'bag':
         USE_ROS1 = True
     else:
@@ -1177,28 +1204,17 @@ if __name__ == '__main__':
         import rclpy
         from rclpy.serialization import deserialize_message
         from rosbag2_py import SequentialReader, StorageOptions, ConverterOptions
+        rclpy_module = rclpy
         logger.info(f"Use ROS2")
     else:
         import rosbag
         logger.info(f"Use ROS1")
 
     if not USE_ROS1:
-        rclpy.init()
-
-    if robot_type not in ['r1pro', 'r1', 'r1lite']:
-        logger.error(f'Unknown robot type: {robot_type}')
-        exit(1)
-
-    try:
-        # 改进json文件的写入方式，避免在多进程环境下出现文件写入冲突
-        # if not os.path.exists(output_dir + f'/{dataset_name}'):
-        #     os.makedirs(output_dir + f'/{dataset_name}')
-        # training_data_set_meta_file = os.path.join(output_dir, f'{dataset_name}/training_data_set_meta.json')
-        training_data_set_meta_file = os.path.join(output_dir, f'training_data_set_meta.json')
-        with open(training_data_set_meta_file, "w", encoding="utf-8") as f:
-            json.dump(mcaps_dict, f, indent=4)
-    except Exception as e:
-        logger.error(f'Error writing {training_data_set_meta_file}, {e}')
+        if rclpy_module is None:
+            logger.error("rclpy is not available in ROS2 mode")
+            exit(1)
+        rclpy_module.init()
 
     data_converter = DataConverter(
         robot_type, 
@@ -1217,5 +1233,5 @@ if __name__ == '__main__':
     # 2. process messages.
     data_converter.process_all(mcaps_dict)
 
-    if not USE_ROS1:    
-        rclpy.shutdown()
+    if (not USE_ROS1) and (rclpy_module is not None):
+        rclpy_module.shutdown()

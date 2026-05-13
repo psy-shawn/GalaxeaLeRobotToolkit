@@ -144,8 +144,7 @@ Output Format Examples:
         self,
         encoded_frames: List[tuple],
         episode_info: Optional[Dict] = None,
-        use_grid: bool = True,
-        video_path: Optional[str] = None,
+        use_grid: bool = True
     ) -> Dict[str, Any]:
         """
         使用VLM标注视频帧
@@ -159,15 +158,14 @@ Output Format Examples:
             标注结果字典
         """
         if use_grid:
-            return self._annotate_with_grid(encoded_frames, episode_info, video_path)
+            return self._annotate_with_grid(encoded_frames, episode_info)
         else:
-            return self._annotate_with_sequence(encoded_frames, episode_info, video_path)
+            return self._annotate_with_sequence(encoded_frames, episode_info)
     
     def _annotate_with_grid(
         self,
         encoded_frames: List[tuple],
-        episode_info: Optional[Dict] = None,
-        video_path: Optional[str] = None,
+        episode_info: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """使用网格图模式标注（推荐）"""
         from video_processor import create_frame_grid
@@ -179,25 +177,18 @@ Output Format Examples:
             return {"actions": [], "task_summary": "", "task_summary_en": ""}
         
         # 构建用户提示
-        video_path_text = video_path or "未知路径"
         user_prompt = f"""请分析这个机器人操作视频的关键帧网格图。
 
 视频信息：
 - 总时长: {encoded_frames[-1][0]:.1f}秒
 - 网格时间点: {', '.join([f'{t:.1f}s' for t in timestamps])}
 - 任务背景: {episode_info.get('task', '未知任务') if episode_info else '未知任务'}
-- 数据文件路径: {video_path_text}
-
-【额外监督信息】
-- 上述“数据文件路径”中可能包含诸如 right_arm、left_arm、dual_arm、body 等关键词
-- 请将这些信息视为强监督信号：例如当路径中包含 right_arm 时，应优先判断为右臂任务，避免错误标为左臂或双臂
 
 标注要求：
 1. 识别完整的操作动作（不要过度细分为接近、抓取、移动等多个小步骤）
 2. 明确标注"左臂"、"右臂"或"双臂"（不要使用"机械臂"）
 3. 如有多个相似物体，用方位（左侧、右边）或序号（第一个、中间）区分
 4. 10s左右的视频，生成1个动作即可，30s的视频生成2-3个动作，60s的视频生成5-8个动作
-5. 当画面信息与“数据文件路径”中的臂别提示不一致时，请综合判断，但要特别避免将纯右臂任务误判为左臂
 
 请仔细观察每一帧，按照要求的JSON格式输出标注结果。"""
         
@@ -207,8 +198,7 @@ Output Format Examples:
     def _annotate_with_sequence(
         self,
         encoded_frames: List[tuple],
-        episode_info: Optional[Dict] = None,
-        video_path: Optional[str] = None,
+        episode_info: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """使用帧序列模式标注（成本较高）"""
         # 采样关键帧（最多12帧）
@@ -227,27 +217,18 @@ Output Format Examples:
             })
         
         # 构建用户提示
-        video_path_text = video_path or "未知路径"
         user_prompt = f"""请分析这段机器人操作视频。
 
 视频信息：
 - 总时长: {encoded_frames[-1][0]:.1f}秒
 - 关键时间点: {', '.join([f'{t:.1f}s' for t in timestamps])}
 - 任务背景: {episode_info.get('task', '未知任务') if episode_info else '未知任务'}
-- 数据文件路径: {video_path_text}
-
-【额外监督信息】
-- 上述“数据文件路径”中可能包含诸如 right_arm、left_arm、dual_arm、body 等关键词
-- 请将这些信息视为强监督信号：例如当路径中包含 right_arm 时，应优先判断为右臂任务，避免错误标为左臂或双臂
 
 标注要求：
 1. 识别完整的操作动作（不要过度细分为接近、抓取、移动等多个小步骤）
 2. 明确标注"左臂"、"右臂"或"双臂"（不要使用"机械臂"）
-3. 如有多个相似物体，用方位（左侧、右边）或序号（1、2、3）区分，考虑使用“更大的”，“更宽的”，“更长的”等形容词来描述物体的大小和形状
+3. 如有多个相似物体，用方位（左侧、右边）或序号（1、2、3）区分
 4. 10s左右的视频，生成1个动作即可，30s的视频生成2-3个动作，60s的视频生成5-8个动作
-5. 当画面信息与“数据文件路径”中的臂别提示不一致时，请综合判断，但要特别避免将纯右臂任务误判为左臂
-6. 标注涉及物体对象时，需要标注操作物体的位置和颜色等属性，比如“左臂拿起桌面左侧绿色的罐子”或者“右臂拿起桌面右侧红色的杯子”
-7. 对于连贯事件，比如当你看到抓取杯子后杯子又掉了，就可以在下一段的事件标注中补充“重新抓取刚才掉落的杯子”、“再次抓取同一纸杯”之类的说明信息，使得标注更细致
 
 请仔细观察每一帧，按照要求的JSON格式输出标注结果。"""
         

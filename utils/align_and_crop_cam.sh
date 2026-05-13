@@ -2,12 +2,19 @@
 set -e
 
 # 配置参数
-DATA_ROOT="/Users/psy/workspace/data/galaxea/r1lite/20260206/pick_place"
-CAM_ROOT="/Users/psy/workspace/data/recordings/pick_place"
+DATA_ROOT="/Users/psy/workspace/data/galaxea/r1lite/stack-xx"
+CAM_ROOT="/Users/psy/workspace/data/galaxea/external/stack-xx-外部相机"
 TOP_CAM_SUBDIR="cam_CP0E753000BN"
 LEFT_CAM_SUBDIR="cam_CP0E753000AH"
 EXT_FPS=15
 MAX_TIME_DIFF_SEC=60
+
+# Python 解释器选择：优先使用 miniforge，其次回退到系统 python3
+if [ -x "/Users/psy/miniforge3/bin/python" ]; then
+    PYTHON_BIN="/Users/psy/miniforge3/bin/python"
+else
+    PYTHON_BIN="python3"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -18,7 +25,14 @@ echo ""
 
 # 第一步: 调用 Python 脚本批量处理和对齐视频
 echo "步骤 1/2: 对齐视频时间戳..."
-python3 "${SCRIPT_DIR}/align_and_crop_cam.py" \
+if ! "$PYTHON_BIN" -c "import yaml" &>/dev/null; then
+    echo "错误: 当前 Python 解释器缺少 PyYAML 依赖: $PYTHON_BIN"
+    echo "请安装后重试:"
+    echo "  $PYTHON_BIN -m pip install pyyaml"
+    exit 1
+fi
+
+"$PYTHON_BIN" "${SCRIPT_DIR}/align_and_crop_cam.py" \
     --data-root "$DATA_ROOT" \
     --cam-root "$CAM_ROOT" \
     --top-cam-subdir "$TOP_CAM_SUBDIR" \
@@ -71,13 +85,13 @@ TOTAL_SUCCESS=0
 
 # 查找所有生成的外部相机视频并修复
 echo "  搜索视频文件..."
-find "$DATA_ROOT" -type f \( -name "rgb_cropped.mp4" -o -name "depth_cropped.mp4" \) | while read -r video_file; do
+while read -r video_file; do
     TOTAL_PROCESSED=$((TOTAL_PROCESSED + 1))
     
     if process_video "$video_file"; then
         TOTAL_SUCCESS=$((TOTAL_SUCCESS + 1))
     fi
-done
+done < <(find "$DATA_ROOT" -type f \( -name "rgb_cropped.mp4" -o -name "depth_cropped.mp4" \))
 
 echo ""
 echo "==================================="

@@ -90,30 +90,6 @@ class AutoAnnotator:
         
         return {}
     
-    def get_raw_mcap_path(self, episode_index: int) -> str:
-        """
-        从training_data_set_meta.json获取原始mcap文件路径（包含监督信息）
-        
-        Args:
-            episode_index: episode索引
-            
-        Returns:
-            原始mcap文件路径，如果未找到则返回None
-        """
-        meta = self.data_updater.load_meta()
-        
-        if 'rawDataList' not in meta:
-            return None
-        
-        # episode_index 对应 rawDataList[episode_index]
-        if episode_index < len(meta['rawDataList']):
-            raw_data = meta['rawDataList'][episode_index]
-            raw_path = raw_data.get('path')
-            if raw_path:
-                return raw_path
-        
-        return None
-    
     def annotate_single_video(
         self,
         video_path: Path,
@@ -132,14 +108,9 @@ class AutoAnnotator:
         episode_index = self.get_episode_index(video_path)
         episode_info = self.get_episode_info(episode_index)
         
-        # 获取原始mcap路径（包含监督信息）
-        raw_mcap_path = self.get_raw_mcap_path(episode_index)
-        
         print(f"\n{'='*60}")
         print(f"处理 Episode {episode_index}: {video_path.name}")
         print(f"当前任务: {episode_info.get('tasks', ['未知'])[0] if episode_info.get('tasks') else '未知'}")
-        if raw_mcap_path:
-            print(f"原始数据路径: {raw_mcap_path}")
         print(f"{'='*60}\n")
         
         # 步骤1: 视频抽帧
@@ -155,12 +126,10 @@ class AutoAnnotator:
         
         # 步骤2: VLM推理
         print("\n步骤2: VLM推理...")
-        # 使用原始mcap路径（包含监督信息）而不是视频文件路径
         vlm_result = self.vlm_annotator.annotate_video_frames(
             encoded_frames,
             episode_info=episode_info,
-            use_grid=self.use_grid,
-            video_path=raw_mcap_path or str(video_path),  # 优先使用原始mcap路径
+            use_grid=self.use_grid
         )
         
         if 'error' in vlm_result:
@@ -169,9 +138,6 @@ class AutoAnnotator:
         
         # 打印结果
         print(f"\n标注结果:")
-        print(f"视频路径: {video_path}")
-        if raw_mcap_path:
-            print(f"原始数据路径: {raw_mcap_path}")
         print(f"任务总结: {vlm_result.get('task_summary', 'N/A')}")
         print(f"识别到 {len(vlm_result.get('actions', []))} 个动作:")
         for i, action in enumerate(vlm_result.get('actions', []), 1):
@@ -198,7 +164,6 @@ class AutoAnnotator:
         
         return {
             'episode_index': episode_index,
-            'video_path': str(video_path),
             'vlm_result': vlm_result,
             'video_duration': video_duration,
             'raw_file_name': episode_info.get('raw_file_name')
